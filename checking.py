@@ -5,89 +5,102 @@ from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
 import json
+import os
+
 
 # Load configuration from JSON file
-with open('config.json', 'r') as config_file:
-    config = json.load(config_file)
+def load_config(file_path):
+    with open(file_path, 'r') as config_file:
+        return json.load(config_file)
 
-# Configuration
-smtp_host = config['smtp_host']  # SMTP server hostname
-smtp_port = config['smtp_port']  # SMTP server port
-smtp_user = config['smtp_user']  # SMTP server username
-smtp_password = config['smtp_password']  # SMTP server password
-from_email = config['from_email']  # Sender's email address
-to_email = config['to_email'] # Recipient's email address
-checkin_file = config['checkin_file'] # File path for check-in timestamp
-counter_file = config['counter_file'] # File path for email counter
-DAYS_REMINDER = config['DAYS_REMINDER'] # Days for the reminder period
-DAYS_DEADMAN = config['DAYS_DEADMAN'] # Days for the dead man's switch
-SECONDS_IN_A_DAY = config['SECONDS_IN_A_DAY'] # Number of seconds in a day
-count_sent_mail = config['count_sent_mail'] # Number of dead man mails to send after activation.
 
-family_members = config['family_members'] # List of family members' email addresses
-
-# Email content
-reminder_subject = config['reminder_subject'] # Subject for the reminder email
-reminder_message = config['reminder_message'] # Message for the reminder email
-
-dead_man_activation_subject = config['dead_man_activation_subject'] # Subject for the activation email
-dead_man_activation_message = config['dead_man_activation_message'] # Message for the activation email
-
-dead_man_subject = config['dead_man_subject'] # Subject for the dead man's switch email
-dead_man_message = config['dead_man_message'] # Message for the dead man's switch email
-files_to_attach = config['files_to_attach'] # List of files to attach
-
-# Function to send an email
-def send_email(subject, message, to, attachments=[]):
-    s = smtplib.SMTP(host=smtp_host, port=smtp_port)
-    s.starttls()
-    s.login(smtp_user, smtp_password)
-
-    msg = MIMEMultipart()
-    msg['From'] = from_email
-    msg['To'] = to
-    msg['Subject'] = subject
-
-    msg.attach(MIMEText(message, 'plain'))
-
-    for file in attachments:
-        with open(file, 'rb') as file_in:
-            part = MIMEBase('application', 'octet-stream')
-            part.set_payload(file_in.read())
-            encoders.encode_base64(part)
-            part.add_header('Content-Disposition', f"attachment; filename={file}")
-            msg.attach(part)
-
-    s.send_message(msg)
-    s.quit()
-
-# Function to execute the dead man's switch
-def execute_deadman_switch():
+# Email sending functionality
+def send_email(smtp_host, smtp_port, smtp_user, smtp_password, from_email, subject, message, to, attachments=[]):
     try:
-        with open(counter_file, "r") as file:
-            counter = int(file.read())
-    except FileNotFoundError:
+        with smtplib.SMTP(host=smtp_host, port=smtp_port) as server:
+            server.starttls()
+            server.login(smtp_user, smtp_password)
+
+            msg = MIMEMultipart()
+            msg['From'] = from_email
+            msg['To'] = to
+            msg['Subject'] = subject
+            msg.attach(MIMEText(message, 'plain'))
+
+            for file in attachments:
+                try:
+                    with open(file, 'rb') as file_in:
+                        part = MIMEBase('application', 'octet-stream')
+                        part.set_payload(file_in.read())
+                        encoders.encode_base64(part)
+                        part.add_header('Content-Disposition', f"attachment; filename={os.path.basename(file)}")
+                        msg.attach(part)
+                except FileNotFoundError:
+                    print(f"Warning: File {file} not found. Skipping attachment.")
+
+            server.send_message(msg)
+            print(f"Email sent to {to} with subject: {subject}")
+    except Exception as e:
+        print(f"Error sending email: {e}")
+
+
+# Execute dead man's switch emails
+def execute_deadman_switch(counter_file, count_sent_mail, dead_man_subject, dead_man_message, family_members, attachments, config):
+    try:
         counter = 0
+        if os.path.exists(counter_file):
+            with open(counter_file, "r") as file:
+                counter = int(file.read())
+    except ValueError:
+        print("Counter file is corrupted. Resetting counter to 0.")
 
     if counter < count_sent_mail:
-        send_email(dead_man_subject, dead_man_message, ', '.join(family_members), files_to_attach)
-        
+        send_email(
+            config['smtp_host'], config['smtp_port'], config['smtp_user'], config['smtp_password'],
+            config['from_email'], dead_man_subject, dead_man_message,
+            ', '.join(family_members), attachments
+        )
         with open(counter_file, "w") as file:
             file.write(str(counter + 1))
+    else:
+        print("All dead man's switch emails have been sent.")
 
-# Function to check the dead man's switch
-def check_deadman():
-    with open(checkin_file, "r") as file:
-        last_checkin_time = float(file.read().strip())
+
+# Check if the dead man's switch needs to be activated
+def check_deadman(config):
+    try:
+        with open(config['checkin_file'], "r") as file:
+            last_checkin_time = float(file.read().strip())
+    except FileNotFoundError:
+        print("Check-in file not found. Assuming no check-in has been recorded.")
+        last_checkin_time = 0
 
     time_difference = time.time() - last_checkin_time
-
-    if time_difference > DAYS_REMINDER * SECONDS_IN_A_DAY:
-        if time_difference > DAYS_DEADMAN * SECONDS_IN_A_DAY:
-            send_email(dead_man_activation_subject, dead_man_activation_message, to_email)
-            execute_deadman_switch()
+    if time_difference > config['DAYS_REMINDER'] * config['SECONDS_IN_A_DAY']:
+        if time_difference > config['DAYS_DEADMAN'] * config['SECONDS_IN_A_DAY']:
+            send_email(
+                config['smtp_host'], config['smtp_port'], config['smtp_user'], config['smtp_password'],
+                config['from_email'], config['dead_man_activation_subject'], config['dead_man_activation_message'],
+                config['to_email']
+            )
+            execute_deadman_switch(
+                config['counter_file'], config['count_sent_mail'], config['dead_man_subject'], config['dead_man_message'],
+                config['family_members'], config['files_to_attach'], config
+            )
         else:
-            send_email(reminder_subject, reminder_message, to_email)
+            send_email(
+                config['smtp_host'], config['smtp_port'], config['smtp_user'], config['smtp_password'],
+                config['from_email'], config['reminder_subject'], config['reminder_message'],
+                config['to_email']
+            )
+    else:
+        print("No action required. Last check-in is within the safe time frame.")
+
 
 if __name__ == '__main__':
-    check_deadman()
+    try:
+        CONFIG_FILE_PATH = 'config.json'
+        config = load_config(CONFIG_FILE_PATH)
+        check_deadman(config)
+    except Exception as e:
+        print(f"Error: {e}")
